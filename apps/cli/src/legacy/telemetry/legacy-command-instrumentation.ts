@@ -5,6 +5,7 @@ import {
   getCommandRuntimeSpanName,
 } from "../../shared/runtime/command-runtime.service.ts";
 import { Output } from "../../shared/output/output.service.ts";
+import { LegacyOutputFlag } from "../../shared/legacy/global-flags.ts";
 import { ProcessControl } from "../../shared/runtime/process-control.service.ts";
 import { withAnalyticsContext } from "../../shared/telemetry/analytics-context.ts";
 import { Analytics } from "../../shared/telemetry/analytics.service.ts";
@@ -14,6 +15,12 @@ import {
   PropExitCode,
   PropOutputFormat,
 } from "../../shared/telemetry/event-catalog.ts";
+import {
+  LEGACY_RESOURCE_OUTPUT_FORMATS,
+  LegacyInvalidOutputFormatError,
+  legacyInvalidOutputFormatMessage,
+} from "../shared/legacy-go-output-flag.ts";
+import { LegacyTelemetryOutputFormat } from "./legacy-telemetry-output-format.service.ts";
 import { LegacyIdentityStitch } from "../shared/legacy-identity-stitch.ts";
 import {
   VALUE_CONSUMING_LONG_FLAGS,
@@ -27,6 +34,13 @@ interface LegacyCommandInstrumentationOptions<Flags extends Record<string, unkno
   // Go's `markFlagTelemetrySafe` annotation in cmd/root_analytics.go. Boolean
   // flag values are always passed through, matching Go's isBooleanFlag branch.
   readonly safeFlags?: ReadonlyArray<string>;
+  // The `-o`/`--output` values this command accepts, mirroring Go's per-command
+  // `--output` enum (`internal/utils/enum.go`). Defaults to the resource-command
+  // set; `db query` overrides with `json|table|csv`. The shared global
+  // `LegacyOutputFlag` accepts the union of all commands' values, so the wrapper
+  // re-validates against the command's own set and rejects out-of-enum values
+  // exactly as Go's flag parser does. See `legacy-go-output-flag.ts`.
+  readonly outputFormats?: ReadonlyArray<string>;
   // Short-flag → canonical-flag-name map (e.g. `{ s: "schema" }`). Go's
   // `changedFlags()` uses pflag's `Visit`, which reports the CANONICAL flag name
   // whether the user typed the long form (`--schema`) or the registered shorthand
@@ -35,8 +49,33 @@ interface LegacyCommandInstrumentationOptions<Flags extends Record<string, unkno
   readonly aliases?: Readonly<Record<string, string>>;
 }
 
+/**
+ * Reject an out-of-enum `-o`/`--output` value before the command runs, matching
+ * Go's parse-time rejection (which happens before telemetry fires, so no event
+ * is emitted for a rejected flag). `LegacyOutputFlag` is read optionally: it is a
+ * root global in production but is absent from focused wrapper tests, where
+ * validation is simply skipped.
+ */
+const validateLegacyOutputFormat = (allowed: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const flag = yield* Effect.serviceOption(LegacyOutputFlag);
+    if (Option.isNone(flag) || Option.isNone(flag.value)) return;
+    const value = flag.value.value;
+    if (allowed.includes(value)) return;
+    return yield* Effect.fail(
+      new LegacyInvalidOutputFormatError({
+        message: legacyInvalidOutputFormatMessage(value, allowed),
+      }),
+    );
+  });
+
 const REDACTED_VALUE = "<redacted>";
-const LEGACY_GO_MACHINE_OUTPUT_FORMATS = new Set(["env", "json", "toml", "yaml"]);
+// Fallback `-o` → telemetry derivation for commands that don't record a resolved
+// format in `LegacyTelemetryOutputFormat`. `db query` records its resolved
+// `json|table|csv` in that cell (so `table` / the human default report correctly);
+// this set only governs the fallback, where a non-machine `-o` (`table`/`pretty`)
+// collapses to the resolved text format.
+const LEGACY_GO_MACHINE_OUTPUT_FORMATS = new Set(["env", "json", "toml", "yaml", "csv"]);
 const LEGACY_GO_OUTPUT_FORMATS = new Set([...LEGACY_GO_MACHINE_OUTPUT_FORMATS, "pretty"]);
 
 function toCliFlagName(key: string): string {
@@ -226,6 +265,14 @@ function withLegacyCommandAnalyticsImplementation<Flags extends Record<string, u
         const exit = yield* self.pipe(withAnalyticsContext(analyticsContext), Effect.exit);
         const finishedAt = yield* Clock.currentTimeMillis;
 
+        // A command that resolves its own `--output` (e.g. `db query`, default
+        // `table`/`json` by agent mode) records it in this cell; Go mirrors that
+        // resolved value onto the global the event reads. Read optionally so
+        // commands that don't provide the cell keep the default derivation.
+        const outputFormatCell = yield* Effect.serviceOption(LegacyTelemetryOutputFormat);
+        const resolvedOutputFormat = Option.isSome(outputFormatCell)
+          ? yield* outputFormatCell.value.get
+          : Option.none<string>();
         // Go records the telemetry exit code from the real process exit code
         // (`cmd/root.go:177` -> `exitCode(err)`), which is 1 whenever the command
         // exits non-zero. A handler can signal a non-zero exit WITHOUT failing the
@@ -258,7 +305,9 @@ function withLegacyCommandAnalyticsImplementation<Flags extends Record<string, u
           .capture(EventCommandExecuted, {
             [PropExitCode]: recordedExitCode,
             [PropDurationMs]: finishedAt - startedAt,
-            [PropOutputFormat]: resolveOutputFormatForTelemetry(args, output.format),
+            [PropOutputFormat]: Option.isSome(resolvedOutputFormat)
+              ? resolvedOutputFormat.value
+              : resolveOutputFormatForTelemetry(args, output.format),
           })
           .pipe(withAnalyticsContext(captureContext));
 
@@ -272,17 +321,31 @@ function withLegacyCommandAnalyticsImplementation<Flags extends Record<string, u
 
 export function withLegacyCommandInstrumentation(): <A, E, R>(
   self: Effect.Effect<A, E, R>,
-) => Effect.Effect<A, E, R | Analytics | CommandRuntime | Stdio.Stdio | Output | ProcessControl>;
+) => Effect.Effect<
+  A,
+  E | LegacyInvalidOutputFormatError,
+  R | Analytics | CommandRuntime | Stdio.Stdio | Output | ProcessControl
+>;
 export function withLegacyCommandInstrumentation<Flags extends Record<string, unknown>>(
   options: LegacyCommandInstrumentationOptions<Flags>,
 ): <A, E, R>(
   self: Effect.Effect<A, E, R>,
-) => Effect.Effect<A, E, R | Analytics | CommandRuntime | Stdio.Stdio | Output | ProcessControl>;
+) => Effect.Effect<
+  A,
+  E | LegacyInvalidOutputFormatError,
+  R | Analytics | CommandRuntime | Stdio.Stdio | Output | ProcessControl
+>;
 export function withLegacyCommandInstrumentation<Flags extends Record<string, unknown>>(
   options?: LegacyCommandInstrumentationOptions<Flags>,
 ) {
-  if (options?.analytics === false) {
-    return withLegacyCommandTracingImplementation();
-  }
-  return withLegacyCommandAnalyticsImplementation(options);
+  const allowed = options?.outputFormats ?? LEGACY_RESOURCE_OUTPUT_FORMATS;
+  const instrument =
+    options?.analytics === false
+      ? withLegacyCommandTracingImplementation()
+      : withLegacyCommandAnalyticsImplementation(options);
+  return <A, E, R>(self: Effect.Effect<A, E, R>) =>
+    // Validate the `-o` enum first, before instrumentation runs the handler, so a
+    // rejected flag fails without emitting a `cli_command_executed` event — Go
+    // rejects it at parse time, before telemetry.
+    Effect.andThen(validateLegacyOutputFormat(allowed), instrument(self));
 }

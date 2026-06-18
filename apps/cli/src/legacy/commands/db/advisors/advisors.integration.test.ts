@@ -86,6 +86,7 @@ function mockResolver(opts: { ipv6Error?: boolean } = {}) {
           isLocal: flags.connType !== "linked",
         } satisfies LegacyResolvedDbConfig;
       }),
+    resolvePoolerFallback: () => Effect.succeed(Option.none()),
   });
   return {
     layer,
@@ -106,6 +107,7 @@ function mockConnection(opts: {
       Effect.succeed({
         extensionExists: () => Effect.succeed(false),
         copyToCsv: () => Effect.succeed(new Uint8Array()),
+        queryRaw: () => Effect.succeed({ fields: [], rows: [], commandTag: "" }),
         exec: (sql: string) =>
           Effect.suspend(() => {
             execs.push(sql);

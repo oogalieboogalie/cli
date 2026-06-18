@@ -88,6 +88,10 @@ function legacyIssueMockOutput(opts: { readonly format?: OutputFormat } = {}) {
         Effect.sync(() => {
           rawChunks.push(text);
         }),
+      rawBytes: (bytes: Uint8Array) =>
+        Effect.sync(() => {
+          rawChunks.push(new TextDecoder().decode(bytes));
+        }),
     }),
     messages,
     get stdoutText() {

@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { vi } from "vitest";
 
-import { LegacyDebugFlag } from "../../shared/legacy/global-flags.ts";
+import { LegacyDebugFlag, LegacyDnsResolverFlag } from "../../shared/legacy/global-flags.ts";
 import { Analytics } from "../../shared/telemetry/analytics.service.ts";
 import { TelemetryRuntime } from "../../shared/telemetry/runtime.service.ts";
 import { makeTelemetryIdentity } from "../../shared/telemetry/identity.ts";
@@ -17,6 +17,8 @@ import { LegacyCliConfig } from "../config/legacy-cli-config.service.ts";
 import { legacyDebugLoggerLayer } from "../shared/legacy-debug-logger.layer.ts";
 import { legacyIdentityStitchLayer } from "../shared/legacy-identity-stitch.ts";
 import { LegacyCredentials } from "./legacy-credentials.service.ts";
+import { legacyPlatformApiFactoryLayer } from "./legacy-platform-api-factory.layer.ts";
+import { LegacyPlatformApiFactory } from "./legacy-platform-api-factory.service.ts";
 import { legacyPlatformApiLayer } from "./legacy-platform-api.layer.ts";
 import { LegacyPlatformApi } from "./legacy-platform-api.service.ts";
 
@@ -193,6 +195,8 @@ function withBaseDeps(
       Layer.provide(identityStitch),
       Layer.provide(legacyDebugLoggerLayer),
       Layer.provide(Layer.succeed(LegacyDebugFlag, opts.debug ?? false)),
+      // The lazy platform-API factory's DoH fetch layer reads the DNS-resolver flag.
+      Layer.provide(Layer.succeed(LegacyDnsResolverFlag, "native")),
     );
 }
 
@@ -519,6 +523,62 @@ describe("legacyPlatformApiLayer", () => {
       } finally {
         rmSync(configDir, { recursive: true, force: true });
       }
+    }).pipe(Effect.provide(layer));
+  });
+});
+
+// The lazy factory underpins the `--linked` db-config resolver's auth-free
+// `--password` path (CLI port of Go's `NewDbConfigWithPassword`, which only calls
+// `GetSupabase` — and thus loads a token — when no password is supplied). Building
+// the factory must therefore resolve NO token; the friendly auth error must still
+// surface when a command branch actually reaches `make` (e.g. minting a temp role).
+describe("legacyPlatformApiFactoryLayer (lazy token)", () => {
+  it.effect("builds without resolving an access token even when none is configured", () => {
+    const layer = legacyPlatformApiFactoryLayer.pipe(
+      Layer.provide(mockCliConfig({})),
+      Layer.provide(mockCredentials(Option.none())),
+      withBaseDeps(),
+    );
+    // The eager `legacyPlatformApiLayer` would fail to build here; obtaining the
+    // factory service without touching `make` must succeed — this is exactly the
+    // `--linked --password` path, which never mints a temp role.
+    return Effect.gen(function* () {
+      const factory = yield* LegacyPlatformApiFactory;
+      expect(typeof factory.make).toBe("object");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("make fails with LegacyPlatformAuthRequiredError when no token is configured", () => {
+    const layer = legacyPlatformApiFactoryLayer.pipe(
+      Layer.provide(mockCliConfig({})),
+      Layer.provide(mockCredentials(Option.none())),
+      withBaseDeps(),
+    );
+    return Effect.gen(function* () {
+      const factory = yield* LegacyPlatformApiFactory;
+      const exit = yield* Effect.exit(factory.make);
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const errorJson = JSON.stringify(exit.cause);
+        expect(errorJson).toContain("LegacyPlatformAuthRequiredError");
+        expect(errorJson).toContain("Access token not provided");
+      }
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("make resolves a single cached client when a token is configured", () => {
+    const layer = legacyPlatformApiFactoryLayer.pipe(
+      Layer.provide(mockCliConfig({ accessToken: VALID_TOKEN })),
+      Layer.provide(mockCredentials(Option.none())),
+      withBaseDeps(),
+    );
+    return Effect.gen(function* () {
+      const factory = yield* LegacyPlatformApiFactory;
+      const first = yield* factory.make;
+      const second = yield* factory.make;
+      // `Effect.cached` guarantees the token is resolved once and the same client
+      // instance is reused across repeated `make` calls within one command run.
+      expect(first).toBe(second);
     }).pipe(Effect.provide(layer));
   });
 });

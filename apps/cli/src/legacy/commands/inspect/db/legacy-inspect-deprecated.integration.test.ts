@@ -55,12 +55,14 @@ function setup() {
     Layer.succeed(LegacyDbConfigResolver, {
       resolve: (_flags: LegacyDbConfigFlags) =>
         Effect.succeed({ conn: LOCAL_CONN, isLocal: true } satisfies LegacyResolvedDbConfig),
+      resolvePoolerFallback: () => Effect.succeed(Option.none()),
     }),
     Layer.succeed(LegacyDbConnection, {
       connect: () =>
         Effect.succeed({
           exec: () => Effect.void,
           extensionExists: () => Effect.succeed(false),
+          queryRaw: () => Effect.succeed({ fields: [], rows: [], commandTag: "" }),
           copyToCsv: () => Effect.succeed(new Uint8Array()),
           query: (sql: string) => {
             querySql = sql;

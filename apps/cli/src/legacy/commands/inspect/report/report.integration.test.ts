@@ -66,6 +66,7 @@ function mockResolver(opts: { conn?: LegacyPgConnInput; isLocal?: boolean; fails
         isLocal: opts.isLocal ?? true,
       } satisfies LegacyResolvedDbConfig);
     },
+    resolvePoolerFallback: () => Effect.succeed(Option.none()),
   });
   return {
     layer,
@@ -92,6 +93,7 @@ function mockReportConnection(opts: {
         exec: () => Effect.void,
         extensionExists: () => Effect.succeed(false),
         query: () => Effect.succeed([]),
+        queryRaw: () => Effect.succeed({ fields: [], rows: [], commandTag: "" }),
         copyToCsv: (sql: string) => {
           copiedSql.push(sql);
           if (opts.copyFails === true) {

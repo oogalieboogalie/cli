@@ -59,6 +59,7 @@ function mockResolver(opts: { isLocal?: boolean } = {}) {
         isLocal: opts.isLocal ?? true,
       } satisfies LegacyResolvedDbConfig);
     },
+    resolvePoolerFallback: () => Effect.succeed(Option.none()),
   });
   return {
     layer,
@@ -84,6 +85,7 @@ function mockConnection(opts: {
       Effect.succeed({
         extensionExists: () => Effect.succeed(false),
         copyToCsv: () => Effect.succeed(new Uint8Array()),
+        queryRaw: () => Effect.succeed({ fields: [], rows: [], commandTag: "" }),
         // Record at run-time (inside the effect), not call-time, so a finalizer
         // built with `session.exec("rollback")` is logged only when it runs.
         exec: (sql: string) =>

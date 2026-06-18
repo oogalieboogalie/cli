@@ -1,11 +1,16 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, Layer, Option, Stdio } from "effect";
 import { commandRuntimeLayer } from "../../shared/runtime/command-runtime.layer.ts";
+import { LegacyOutputFlag } from "../../shared/legacy/global-flags.ts";
 import { CurrentAnalyticsContext } from "../../shared/telemetry/analytics-context.ts";
 import { Analytics } from "../../shared/telemetry/analytics.service.ts";
 import { ProcessControl } from "../../shared/runtime/process-control.service.ts";
 import { LegacyIdentityStitch } from "../shared/legacy-identity-stitch.ts";
 import { withLegacyCommandInstrumentation } from "./legacy-command-instrumentation.ts";
+import {
+  LEGACY_QUERY_OUTPUT_FORMATS,
+  LegacyInvalidOutputFormatError,
+} from "../shared/legacy-go-output-flag.ts";
 import { mockOutput, mockProcessControl } from "../../../tests/helpers/mocks.ts";
 
 function mockLegacyIdentityStitch(opts: { stitchedDistinctId?: string }) {
@@ -187,6 +192,29 @@ describe("withLegacyCommandInstrumentation", () => {
     );
   });
 
+  it.live("redacts the --password credential (never safe-listed)", () => {
+    const analytics = mockContextualAnalytics();
+
+    return Effect.void.pipe(
+      withLegacyCommandInstrumentation({
+        flags: { password: Option.some("super-secret") },
+      }),
+      Effect.provide(analytics.layer),
+      Effect.provide(mockProcessControl().layer),
+      Effect.provide(mockOutput({ format: "text" }).layer),
+      Effect.provide(
+        Stdio.layerTest({ args: Effect.succeed(["db", "dump", "--password", "super-secret"]) }),
+      ),
+      Effect.provide(commandRuntimeLayer(["db", "dump"])),
+      Effect.tap(() =>
+        Effect.sync(() => {
+          const event = analytics.captured[0];
+          expect(event?.properties.flags).toEqual({ password: "<redacted>" });
+        }),
+      ),
+    );
+  });
+
   it.live("records a flag set via its shorthand under the canonical name", () => {
     // Go's changedFlags() uses pflag Visit, which reports the canonical `schema`
     // name even when the user typed the `-s` shorthand (cmd/db.go:506). The alias
@@ -212,6 +240,136 @@ describe("withLegacyCommandInstrumentation", () => {
           const event = analytics.captured[0];
           // Slice flag stays redacted (not an EnumFlag/bool), but it IS recorded.
           expect(event?.properties.flags).toEqual({ schema: "<redacted>" });
+        }),
+      ),
+    );
+  });
+
+  it.live("records db dump shorthand flags (-x/-f) under their canonical names", () => {
+    // db dump declares -s/-x/-f/-p shorthands; Go's changedFlags() reports the
+    // canonical long names, so the instrumentation alias map must map all of them.
+    const analytics = mockContextualAnalytics();
+
+    return Effect.void.pipe(
+      withLegacyCommandInstrumentation({
+        flags: { exclude: ["public.users"], file: Option.some("out.sql") },
+        aliases: { s: "schema", x: "exclude", f: "file", p: "password" },
+      }),
+      Effect.provide(analytics.layer),
+      Effect.provide(mockProcessControl().layer),
+      Effect.provide(mockOutput({ format: "text" }).layer),
+      Effect.provide(
+        Stdio.layerTest({
+          args: Effect.succeed(["db", "dump", "-x", "public.users", "-f", "out.sql"]),
+        }),
+      ),
+      Effect.provide(commandRuntimeLayer(["db", "dump"])),
+      Effect.tap(() =>
+        Effect.sync(() => {
+          const event = analytics.captured[0];
+          expect(event?.properties.flags).toEqual({ exclude: "<redacted>", file: "<redacted>" });
+        }),
+      ),
+    );
+  });
+
+  it.live("records db query shorthand -f under its canonical name file", () => {
+    // db query declares only the -f/file shorthand; Go's changedFlags() reports the
+    // canonical `file`, so `db query -f query.sql` must log `file`, not `f`.
+    const analytics = mockContextualAnalytics();
+
+    return Effect.void.pipe(
+      withLegacyCommandInstrumentation({
+        flags: { file: Option.some("query.sql") },
+        aliases: { f: "file" },
+      }),
+      Effect.provide(analytics.layer),
+      Effect.provide(mockProcessControl().layer),
+      Effect.provide(mockOutput({ format: "text" }).layer),
+      Effect.provide(
+        Stdio.layerTest({
+          args: Effect.succeed(["db", "query", "-f", "query.sql"]),
+        }),
+      ),
+      Effect.provide(commandRuntimeLayer(["db", "query"])),
+      Effect.tap(() =>
+        Effect.sync(() => {
+          const event = analytics.captured[0];
+          expect(event?.properties.flags).toEqual({ file: "<redacted>" });
+        }),
+      ),
+    );
+  });
+
+  it.live("records declarative generate shorthands -s/-p under canonical names", () => {
+    // Go registers --schema/-s and --password/-p (cmd/db_schema_declarative.go:495,500);
+    // changedFlags() reports the canonical schema/password.
+    const analytics = mockContextualAnalytics();
+
+    return Effect.void.pipe(
+      withLegacyCommandInstrumentation({
+        flags: { schema: ["public"], password: Option.some("secret") },
+        aliases: { s: "schema", p: "password" },
+      }),
+      Effect.provide(analytics.layer),
+      Effect.provide(mockProcessControl().layer),
+      Effect.provide(mockOutput({ format: "text" }).layer),
+      Effect.provide(
+        Stdio.layerTest({
+          args: Effect.succeed([
+            "db",
+            "schema",
+            "declarative",
+            "generate",
+            "-s",
+            "public",
+            "-p",
+            "secret",
+          ]),
+        }),
+      ),
+      Effect.provide(commandRuntimeLayer(["db", "schema", "declarative", "generate"])),
+      Effect.tap(() =>
+        Effect.sync(() => {
+          const event = analytics.captured[0];
+          expect(event?.properties.flags).toEqual({ schema: "<redacted>", password: "<redacted>" });
+        }),
+      ),
+    );
+  });
+
+  it.live("records declarative sync shorthands -s/-f under canonical names", () => {
+    // Go registers --schema/-s and --file/-f (cmd/db_schema_declarative.go:484-485);
+    // changedFlags() reports the canonical schema/file.
+    const analytics = mockContextualAnalytics();
+
+    return Effect.void.pipe(
+      withLegacyCommandInstrumentation({
+        flags: { schema: ["public"], file: Option.some("out.sql") },
+        aliases: { s: "schema", f: "file" },
+      }),
+      Effect.provide(analytics.layer),
+      Effect.provide(mockProcessControl().layer),
+      Effect.provide(mockOutput({ format: "text" }).layer),
+      Effect.provide(
+        Stdio.layerTest({
+          args: Effect.succeed([
+            "db",
+            "schema",
+            "declarative",
+            "sync",
+            "-s",
+            "public",
+            "-f",
+            "out.sql",
+          ]),
+        }),
+      ),
+      Effect.provide(commandRuntimeLayer(["db", "schema", "declarative", "sync"])),
+      Effect.tap(() =>
+        Effect.sync(() => {
+          const event = analytics.captured[0];
+          expect(event?.properties.flags).toEqual({ schema: "<redacted>", file: "<redacted>" });
         }),
       ),
     );
@@ -402,6 +560,52 @@ describe("withLegacyCommandInstrumentation", () => {
     );
   });
 
+  it.live("rejects an -o value outside the command's enum, before running it", () => {
+    const analytics = mockContextualAnalytics();
+
+    return Effect.sync(() => "must not run").pipe(
+      withLegacyCommandInstrumentation({ flags: {} }),
+      Effect.provide(analytics.layer),
+      Effect.provide(mockOutput({ format: "text" }).layer),
+      Effect.provide(mockProcessControl().layer),
+      Effect.provide(Stdio.layerTest({ args: Effect.succeed(["backups", "list", "-o", "table"]) })),
+      Effect.provide(commandRuntimeLayer(["backups", "list"])),
+      // `table` is valid on the shared global union but not for a resource command.
+      Effect.provide(Layer.succeed(LegacyOutputFlag, Option.some("table" as const))),
+      Effect.flip,
+      Effect.tap((error) =>
+        Effect.sync(() => {
+          expect(error).toBeInstanceOf(LegacyInvalidOutputFormatError);
+          expect((error as LegacyInvalidOutputFormatError).message).toBe(
+            'invalid argument "table" for "-o, --output" flag: must be one of [ env | pretty | json | toml | yaml ]',
+          );
+          // Go rejects at parse time, before telemetry — so no event is emitted.
+          expect(analytics.captured).toEqual([]);
+        }),
+      ),
+    );
+  });
+
+  it.live("accepts a command-specific -o value declared via outputFormats", () => {
+    const analytics = mockContextualAnalytics();
+
+    return Effect.sync(() => "ok").pipe(
+      withLegacyCommandInstrumentation({ flags: {}, outputFormats: LEGACY_QUERY_OUTPUT_FORMATS }),
+      Effect.provide(analytics.layer),
+      Effect.provide(mockOutput({ format: "text" }).layer),
+      Effect.provide(mockProcessControl().layer),
+      Effect.provide(Stdio.layerTest({ args: Effect.succeed(["db", "query", "-o", "csv"]) })),
+      Effect.provide(commandRuntimeLayer(["db", "query"])),
+      Effect.provide(Layer.succeed(LegacyOutputFlag, Option.some("csv" as const))),
+      Effect.tap(() =>
+        Effect.sync(() => {
+          expect(analytics.captured).toHaveLength(1);
+          expect(analytics.captured[0]?.properties.exit_code).toBe(0);
+        }),
+      ),
+    );
+  });
+
   // Identity stitching parity: Go's Execute() reads s.distinctID() after the
   // command handler runs (cmd/root.go:177) and the post-run cli_command_executed
   // capture uses the stitched id. Mirror that with Effect.serviceOption.
@@ -422,6 +626,28 @@ describe("withLegacyCommandInstrumentation", () => {
         Effect.sync(() => {
           expect(analytics.captured).toHaveLength(1);
           expect(analytics.captured[0]?.properties.distinct_id).toBe("gotrue-user-123");
+        }),
+      ),
+    );
+  });
+
+  it.live("rejects a resource-only -o value for db query's narrower enum", () => {
+    const analytics = mockContextualAnalytics();
+
+    return Effect.sync(() => "must not run").pipe(
+      withLegacyCommandInstrumentation({ flags: {}, outputFormats: LEGACY_QUERY_OUTPUT_FORMATS }),
+      Effect.provide(analytics.layer),
+      Effect.provide(mockOutput({ format: "text" }).layer),
+      Effect.provide(mockProcessControl().layer),
+      Effect.provide(Stdio.layerTest({ args: Effect.succeed(["db", "query", "-o", "yaml"]) })),
+      Effect.provide(commandRuntimeLayer(["db", "query"])),
+      Effect.provide(Layer.succeed(LegacyOutputFlag, Option.some("yaml" as const))),
+      Effect.flip,
+      Effect.tap((error) =>
+        Effect.sync(() => {
+          expect((error as LegacyInvalidOutputFormatError).message).toBe(
+            'invalid argument "yaml" for "-o, --output" flag: must be one of [ json | table | csv ]',
+          );
         }),
       ),
     );

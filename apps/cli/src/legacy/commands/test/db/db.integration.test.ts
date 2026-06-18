@@ -52,6 +52,7 @@ const REMOTE_CONN: LegacyPgConnInput = {
 function mockResolver(opts: { conn?: LegacyPgConnInput; isLocal?: boolean } = {}) {
   return Layer.succeed(LegacyDbConfigResolver, {
     resolve: () => Effect.succeed({ conn: opts.conn ?? LOCAL_CONN, isLocal: opts.isLocal ?? true }),
+    resolvePoolerFallback: () => Effect.succeed(Option.none()),
   });
 }
 
@@ -74,6 +75,7 @@ function mockDbConnection(opts: {
         }
       }),
     extensionExists: () => Effect.succeed(opts.existed ?? false),
+    queryRaw: () => Effect.succeed({ fields: [], rows: [], commandTag: "" }),
     copyToCsv: () => Effect.succeed(new Uint8Array()),
     query: () => Effect.succeed([]),
   };
@@ -111,6 +113,18 @@ function mockDockerRun(opts: { exitCode?: number; runFails?: boolean }) {
       return opts.runFails === true
         ? Effect.fail(new LegacyDockerRunError({ message: "failed to run docker: not found" }))
         : Effect.succeed(opts.exitCode ?? 0);
+    },
+    runCapture: (runOpts) => {
+      lastOpts = runOpts;
+      return opts.runFails === true
+        ? Effect.fail(new LegacyDockerRunError({ message: "failed to run docker: not found" }))
+        : Effect.succeed({ exitCode: opts.exitCode ?? 0, stdout: new Uint8Array(0), stderr: "" });
+    },
+    runStream: (runOpts) => {
+      lastOpts = runOpts;
+      return opts.runFails === true
+        ? Effect.fail(new LegacyDockerRunError({ message: "failed to run docker: not found" }))
+        : Effect.succeed({ exitCode: opts.exitCode ?? 0, stderr: "" });
     },
   });
   return {

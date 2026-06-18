@@ -24,6 +24,14 @@ export interface LegacyDbConfigFlags {
   readonly dbUrl: Option.Option<string>;
   readonly connType: LegacyDbConnType | undefined;
   readonly dnsResolver: "native" | "https";
+  /**
+   * The `--password` / `-p` flag value (Go's `viper.GetString("DB_PASSWORD")`,
+   * bound via `viper.BindPFlag` in `apps/cli-go/cmd/db.go`). When `Some`, it
+   * takes precedence over the `SUPABASE_DB_PASSWORD` env var on the linked path,
+   * matching viper's flag-over-env precedence. Commands without a `--password`
+   * flag (e.g. `test db`) omit it; the resolver then falls back to env only.
+   */
+  readonly password?: Option.Option<string>;
 }
 
 /**
@@ -34,4 +42,11 @@ export interface LegacyDbConfigFlags {
 export interface LegacyResolvedDbConfig {
   readonly conn: LegacyPgConnInput;
   readonly isLocal: boolean;
+  /**
+   * The resolved linked project ref (`--linked` path only; `None` for
+   * `--local` / `--db-url`). Lets the caller re-read config with the ref applied
+   * so a matching `[remotes.<ref>]` block overrides e.g. `db.major_version` for the
+   * container image, matching Go's remote-merged `utils.Config` on the linked path.
+   */
+  readonly ref?: Option.Option<string>;
 }
